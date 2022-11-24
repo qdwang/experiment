@@ -1,2 +1,2 @@
-# experiment
-Some web / js / css experiments 
+# experiments
+Some web / js / css experiments
