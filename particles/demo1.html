@@ -1,0 +1,293 @@
+<html>
+
+<head>
+    <title>Particles demo 1</title>
+</head>
+
+<body>
+    <canvas id="abc" width="400" height="400"></canvas>
+    <script>
+        function makeBuffer(gl, sizeOrData) {
+            const buf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER, sizeOrData, gl.DYNAMIC_DRAW);
+            return buf;
+        }
+
+        function makeBufferAndSetAttribute(gl, data, loc, size = 1) {
+            const buf = makeBuffer(gl, data);
+            gl.enableVertexAttribArray(loc);
+            gl.vertexAttribPointer(
+                loc,
+                size,
+                gl.FLOAT,
+                false,
+                0,
+                0,
+            );
+        }
+
+        function prepareBufferToAttrLoc(gl, loc, size = 1) {
+            const buf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.enableVertexAttribArray(loc);
+            gl.vertexAttribPointer(
+                loc,
+                size,
+                gl.FLOAT,
+                false,
+                0,
+                0,
+            );
+            return buf;
+        }
+
+        function prepareInputsAndOutputs(vs, program, gl) {
+            const ins = vs.match(/in\s+?.+?;/g).map(x => x.split(/\s+/g)).map(x => ({ name: x[x.length - 1].slice(0, -1), size: SIZE_MAP[x[x.length - 2]] }));
+            const outs = vs.match(/out.+?;/g).map(x => x.split(/\s+/g)).map(x => ({ name: x[x.length - 1].slice(0, -1), size: SIZE_MAP[x[x.length - 2]] }));
+
+            const inputs = {};
+            ins.forEach(x => {
+                inputs[x.name] = {
+                    buffer: prepareBufferToAttrLoc(gl, gl.getAttribLocation(program, x.name), x.size),
+                    size: x.size,
+                };
+            });
+            const outputs = {};
+            outs.forEach(x => {
+                outputs[x.name] = {
+                    buffer: gl.createBuffer(),
+                    size: x.size
+                }
+            });
+
+            return { inputs, outputs }
+        }
+
+        function createShader(gl, type, src) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, src);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                throw new Error(gl.getShaderInfoLog(shader));
+            }
+            return shader;
+        }
+
+        function createRenderer(gl, vs, fs, gpgpu_outputs) {
+            const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vertexShader, vs);
+            gl.compileShader(vertexShader);
+            if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+                throw new Error(gl.getShaderInfoLog(vertexShader))
+            };
+
+            const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fragmentShader, fs);
+            gl.compileShader(fragmentShader);
+            if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+                throw new Error(gl.getShaderInfoLog(fragmentShader))
+            };
+
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                throw new Error(gl.getProgramInfoLog(program))
+            };
+
+            const ins = vs.match(/in(.+?);/g).map(x => x.split(/\s+/g)).map(x => ({ name: x[x.length - 1].slice(0, -1), size: SIZE_MAP[x[x.length - 2]] }));
+
+            const va = gl.createVertexArray();
+            gl.bindVertexArray(va);
+
+            for (let name in gpgpu_outputs) {
+                gl.bindBuffer(gl.ARRAY_BUFFER, gpgpu_outputs[name].buffer);
+                const loc = gl.getAttribLocation(program, name);
+                gl.enableVertexAttribArray(loc);
+                gl.vertexAttribPointer(
+                    loc,
+                    gpgpu_outputs[name].size,
+                    gl.FLOAT,
+                    false,
+                    0,
+                    0,
+                );
+            }
+
+            gl.bindVertexArray(null);
+            return { program, va };
+        }
+        function render(gl, renderer, size) {
+            gl.bindVertexArray(renderer.va);
+            gl.useProgram(renderer.program);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArrays(gl.POINTS, 0, size);
+        }
+
+        const SIZE_MAP = {
+            vec2: 2,
+            float: 1
+        }
+        const UNIFORM_MAP = {
+            float: 'uniform1f'
+        }
+        function createGPGPU(gl, vs) {
+            const fs = `#version 300 es
+                precision highp float;
+                void main() {}`;
+
+            const vShader = createShader(gl, gl.VERTEX_SHADER, vs);
+            const fShader = createShader(gl, gl.FRAGMENT_SHADER, fs);
+
+            const program = gl.createProgram();
+            gl.attachShader(program, vShader);
+            gl.attachShader(program, fShader);
+            gl.transformFeedbackVaryings(
+                program,
+                vs.match(/out(.+?);/g).map(x => x.split(/\s+/g)).map(x => x[x.length - 1].slice(0, -1)),
+                gl.SEPARATE_ATTRIBS,
+            );
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                throw new Error(gl.getProgramParameter(program));
+            }
+
+            const va = gl.createVertexArray();
+            gl.bindVertexArray(va);
+            const { inputs, outputs } = prepareInputsAndOutputs(vs, program, gl);
+            gl.bindVertexArray(null);
+
+            const uniforms = {};
+            vs.match(/uniform(.+?);/g)?.map(x => x.split(/\s+/g)).forEach(x => {
+                const name = x[x.length - 1].slice(0, -1);
+                const loc = gl.getUniformLocation(program, name);
+                const method = UNIFORM_MAP[x[x.length - 2]];
+                uniforms[name] = v => gl[method](loc, v);
+            });
+
+            return {
+                program,
+                inputs,
+                outputs,
+                uniforms,
+                va
+            };
+        }
+
+        function computeGPGPU(gl, gpgpu, args, args_uniforms, output) {
+            gl.bindVertexArray(gpgpu.va);
+            gl.useProgram(gpgpu.program);
+
+            let len = 0;
+
+            for (let name in gpgpu.inputs) {
+                const item = gpgpu.inputs[name];
+                if (!len) {
+                    len = args[name].length / item.size;
+                }
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, item.buffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(args[name]), gl.DYNAMIC_DRAW);
+            }
+
+            const tf = gl.createTransformFeedback();
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+
+            let index = 0;
+            for (let name in gpgpu.outputs) {
+                const item = gpgpu.outputs[name];
+                gl.bindBuffer(gl.ARRAY_BUFFER, item.buffer);
+                gl.bufferData(gl.ARRAY_BUFFER, item.size * len * 4, gl.DYNAMIC_DRAW);
+
+                gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, index++, item.buffer);
+            }
+
+            for (let name in gpgpu.uniforms) {
+                if (name in args_uniforms) {
+                    gpgpu.uniforms[name](args_uniforms[name]);
+                }
+            }
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+            gl.enable(gl.RASTERIZER_DISCARD);
+
+            gl.beginTransformFeedback(gl.POINTS);
+            gl.drawArrays(gl.POINTS, 0, len);
+            gl.endTransformFeedback();
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+            gl.disable(gl.RASTERIZER_DISCARD);
+
+            if (output) {
+                for (let name in gpgpu.outputs) {
+                    const item = gpgpu.outputs[name];
+                    gl.bindBuffer(gl.ARRAY_BUFFER, item.buffer);
+                    gl.getBufferSubData(
+                        gl.ARRAY_BUFFER,
+                        0,
+                        output[name],
+                    );
+                }
+            }
+
+            return len;
+        }
+    </script>
+    <script>
+        const gl = abc.getContext('webgl2');
+
+        const vs = `#version 300 es
+            uniform float t;
+
+            in vec2 a;
+            in float b;
+
+            out vec2 pos;
+
+            void main() {
+                float id = float(gl_VertexID);
+                pos = cos(sin(t + id) * sin(t - id)) * sin(cos(id + t + a + b) + sin(sin(t) * cos(id) + sin(id)) + cos(vec2(t * id + id * id, t - id )));
+            }
+`;
+
+        const draw_vs = `#version 300 es
+            in vec2 pos;
+
+            out float color;
+
+            void main() {
+                gl_PointSize = 1.0;
+                gl_Position = vec4(pos, 0, 1);
+                color = pos.x * pos.y;
+            }
+        `;
+        const draw_fs = `#version 300 es
+            precision mediump float;
+
+            in float color;
+            out vec4 outColor;
+
+            void main() {
+                outColor = vec4(cos(color) * cos(color), sin(color + sin(color)), sin(color) * sin(color), 1.0);
+            }
+        `;
+
+        const gpgpu = createGPGPU(gl, vs);
+        const renderer = createRenderer(gl, draw_vs, draw_fs, gpgpu.outputs);
+
+        const count = 10_000;
+        const args = { a: new Float32Array(count * 2), b: new Float32Array(count) };
+
+        let t = 0;
+        const draw = () => {
+            t += 0.03;
+            const len = computeGPGPU(gl, gpgpu, args, {t});
+            render(gl, renderer, len);
+            requestAnimationFrame(draw);
+        }
+        requestAnimationFrame(draw)
+    </script>
+</body>
+
+</html>
